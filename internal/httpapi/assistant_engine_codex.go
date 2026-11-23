@@ -60,7 +60,7 @@ func prepareAssistantCodexInvocation(o assistantEngineInvocationOpts) (assistant
 		finish: func(ok bool) {
 			server.closeInput()
 			_ = stdin.Close()
-			if server.threadID != "" && codexConfigKeyRe.MatchString(server.threadID) {
+			if !o.ReviewOnly && server.threadID != "" && codexConfigKeyRe.MatchString(server.threadID) {
 				_ = writeCodexThread(o.Root, o.SessionID, server.threadID)
 			}
 		},
@@ -222,13 +222,17 @@ func (s *codexAppServer) response(message codexRPCMessage) []string {
 		}
 		_ = json.Unmarshal(message.Result, &result)
 		s.threadID = strings.TrimSpace(result.Thread.ID)
-		if codexConfigKeyRe.MatchString(s.threadID) {
+		if !s.opts.ReviewOnly && codexConfigKeyRe.MatchString(s.threadID) {
 			if err := writeCodexThread(s.opts.Root, s.opts.SessionID, s.threadID); err != nil {
 				return s.fail("无法保存 Codex 原生会话引用")
 			}
 		}
 		s.turnPending = true
-		s.request("turn/start", map[string]any{"threadId": s.threadID, "input": []map[string]any{{"type": "text", "text": s.opts.Prompt, "text_elements": []any{}}}})
+		input := []map[string]any{{"type": "text", "text": s.opts.Prompt, "text_elements": []any{}}}
+		for _, path := range s.opts.ImagePaths {
+			input = append(input, map[string]any{"type": "localImage", "path": path})
+		}
+		s.request("turn/start", map[string]any{"threadId": s.threadID, "input": input})
 		return []string{codexLine(map[string]any{"type": "system", "subtype": "init", "session_id": s.threadID})}
 	case "turn/start":
 		if failure != "" {

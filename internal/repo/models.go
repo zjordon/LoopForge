@@ -38,6 +38,7 @@ type userConfigRow struct {
 	GongfengRefreshToken         *string    `gorm:"column:gongfeng_refresh_token;type:text"`
 	GongfengTokenExpiresAt       *time.Time `gorm:"column:gongfeng_token_expires_at"`
 	CodeBuddyAPIKey              *string    `gorm:"column:codebuddy_api_key;type:text"`
+	CodeBuddyBaseURL             *string    `gorm:"column:codebuddy_base_url;type:text"`
 	CodeBuddyInternetEnvironment string     `gorm:"column:codebuddy_internet_environment;size:64"`
 	CodeBuddyModels              *string    `gorm:"column:codebuddy_models;type:text"`
 	CodexAPIKey                  *string    `gorm:"column:codex_api_key;type:text"`
@@ -47,6 +48,7 @@ type userConfigRow struct {
 	ClaudeCodeBaseURL            *string    `gorm:"column:claude_code_base_url;type:text"`
 	ClaudeCodeModels             *string    `gorm:"column:claude_code_models;type:text"`
 	AgentCLICredentials          *string    `gorm:"column:agent_cli_credentials;type:text"`
+	AssistantDefaults            *string    `gorm:"column:assistant_defaults;type:text"`
 	Created                      *time.Time `gorm:"column:created_at"`
 	Updated                      *time.Time `gorm:"column:updated_at"`
 }
@@ -592,12 +594,15 @@ func (userRunnerPrefRow) TableName() string { return "user_runner_prefs" }
 
 // assistantPreferenceRow: a missing row means switches are off and messages queue.
 type assistantPreferenceRow struct {
-	UserID         int64      `gorm:"column:user_id;primaryKey;autoIncrement:false"`
-	ProactiveRoles bool       `gorm:"column:proactive_roles;not null;default:false"`
-	ProactiveSOPs  bool       `gorm:"column:proactive_sops;not null;default:false"`
-	SteerOnSend    bool       `gorm:"column:steer_on_send;not null;default:false"`
-	Instructions   string     `gorm:"column:instructions;type:text"`
-	UpdatedAt      *time.Time `gorm:"column:updated_at"`
+	UserID              int64      `gorm:"column:user_id;primaryKey;autoIncrement:false"`
+	ProactiveRoles      bool       `gorm:"column:proactive_roles;not null;default:false"`
+	ProactiveSOPs       bool       `gorm:"column:proactive_sops;not null;default:false"`
+	SteerOnSend         bool       `gorm:"column:steer_on_send;not null;default:false"`
+	Instructions        string     `gorm:"column:instructions;type:text"`
+	ApprovalReviewMode  string     `gorm:"column:approval_review_mode;size:32;not null;default:''"`
+	ApprovalReviewModel string     `gorm:"column:approval_review_model;size:160;not null;default:''"`
+	ApprovalReviewAPI   *string    `gorm:"column:approval_review_api_json;type:text"`
+	UpdatedAt           *time.Time `gorm:"column:updated_at"`
 }
 
 func (assistantPreferenceRow) TableName() string { return "assistant_preferences" }
@@ -773,6 +778,6 @@ func allModels() []any {
 		requirementSpaceRow{}, spaceMemberRow{}, spaceArtifactRow{}, spaceArtifactRevisionRow{}, spaceThreadRow{},
 		engineInstanceRow{},
 		knowledgeSettingsRow{}, knowledgeSubmissionRow{},
-		pageFeedbackRow{}, pageFeedbackImageRow{}, PlatformGitSSHHost{},
+		PlatformGitSSHHost{}, PlatformGitHTTPSHost{},
 	}
 }

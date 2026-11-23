@@ -11,7 +11,8 @@
 3. [故障排查：需求定型失败（CodeBuddy 依赖）](#3-故障排查需求定型失败codebuddy-依赖)
 4. [替换 SOP 执行器并重跑需求](#4-替换-sop-执行器并重跑需求)
 5. [交付模型：直建 PR vs 集成分支（二选一）](#5-交付模型直建-pr-vs-集成分支二选一)
-6. [附录：API 速查与注意事项](#6-附录api-速查与注意事项)
+6. [升级到 0.4.1：从 v0.4.0 或更早版本](#6-升级到-041从-v040-或更早版本)
+7. [附录：API 速查与注意事项](#7-附录api-速查与注意事项)
 
 ---
 
@@ -194,9 +195,134 @@ Run 详情页第一节点「需求定型」失败（通常十几秒内、0 token
 
 ---
 
-## 6. 附录：API 速查与注意事项
+## 6. 升级到 0.4.1：从 v0.4.0 或更早版本
 
-### 6.1 当晚用过的 API（均可用浏览器登录态直接 fetch）
+> 本章步骤针对本部署的形态：**原生安装**（`bash scripts/dev.sh` 或 `./devctl.sh start`），平台直接跑在宿主机上，MySQL 是 compose 里的 `mysql` 容器。步骤中的命令都按这个形态写。
+> 0.4.1 的官方说明见 `docs/deployment.md` 的「Migrating existing GitHub credentials」一节。
+
+### 6.1 升级前必读：三件必须知道的事
+
+**① 036 迁移必须手工执行，且必须在启动新版本之前。**
+0.4.1 改了 Git 凭据的存储模型：从「每用户一个 `user_configs.git_token`」变成「每用户、每主机一条凭据」（新表 `user_git_http_credentials`）。新代码从新表读凭据，所以不回填就会出现「GitHub 显示已配置，但沙箱里取不到 token」。顺序错了（先起新服务再跑迁移）在这段时间内的推送都会失败。
+
+**② 本部署的安装器不会代劳。**
+`scripts/dev.sh` 只重放 `migrations/seed/001`、`002` 两个文件（见脚本第 17-18 行），**不调用** `install-schema-extensions.sh`。所以 036、038 在本部署上都要手工执行。Compose 发布镜像安装（`./start.sh`）会自动跑 033/038，但**同样不会自动跑 036**。
+
+**③ 内置模板会被改写，你的项目副本不会。**
+038 把内置模板里「发起 MR」角色的认证指令从
+
+> GitHub 仓库优先用已配置的 GitHub MCP，没有时用 curl 调 GitHub API，令牌取 $AGENTFLOW_GIT_TOKEN
+
+改成
+
+> 使用托管平台的 CLI（如 gh、glab）或已配置的 MCP……调用 API 需要令牌时，用 git credential fill 按仓库主机获取
+
+它的 `UPDATE` 只作用于 `generic_templates` 表。本部署的「缺陷修复 SOP」是复制进 `workflows` 表的项目副本（`sop-mwpuifbf-rzri`），**不在改写范围内**，所以「发起 MR」角色会继续带着旧指令运行。旧指令里的 `$AGENTFLOW_GIT_TOKEN` 在 0.4.1 下是否还有效见 6.4 的验证步骤。
+
+### 6.2 备份
+
+```bash
+cd /home/jasonzhang/git/z_jordon/LoopForge
+# 数据库全量导出（回滚的唯一依靠）
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump -uroot --single-transaction loopforge' \
+  > .local/loopforge-pre-0.4.1-$(date +%Y%m%d-%H%M%S).sql
+ls -lh .local/loopforge-pre-0.4.1-*.sql     # 确认不是空文件
+```
+
+`.local/` 已被 Git 忽略，导出文件不会进提交。
+
+### 6.3 升级步骤
+
+```bash
+cd /home/jasonzhang/git/z_jordon/LoopForge
+
+# 1. 停平台，MySQL 保持运行
+./devctl.sh stop            # 注意：不要加 --mysql
+
+# 2. 取新代码（fork 的 main 已合并上游 v0.4.1）
+git pull
+
+# 3. 手工执行 036 —— 必须写全文件名，见下方说明
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u loopforge loopforge' \
+  < migrations/036_git_http_credentials.sql
+
+# 4. 确认回填结果（应看到一行，host = github.com）
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u loopforge loopforge -e \
+  "SELECT user_id, host, platform, username, created_at FROM user_git_http_credentials;"'
+
+# 5. 手工执行 038（只影响内置模板，可重复执行）
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u loopforge loopforge' \
+  < migrations/038_generic_sop_host_credentials.sql
+
+# 6. 重新构建并启动
+./devctl.sh start
+```
+
+**为什么要写全文件名**：`migrations/` 里有两组撞号的脚本——`036_git_http_credentials.sql` 与 `036_assistant_steer_on_send.sql`，`039_platform_git_ssh_hosts.sql` 与 `039_schedule_execution_legacy_stats.sql`。不要用 `036_*.sql` 这样的通配符批量执行，会跑到不相干的脚本。038 还要求在 033 之后执行；本部署此前没有手工跑过 033（内置模板是随新版本 seed 进来的），如果 038 执行后内置模板没变化，先把 `033_generic_sop_mr_node.sql` 跑一遍再重跑 038。
+
+### 6.4 升级后验证（按顺序）
+
+| # | 验证什么 | 怎么做 | 不通过的迹象 |
+|---|---------|--------|-------------|
+| 1 | 凭据已回填 | 6.3 第 4 步的查询有 `github.com` 一行 | 表为空 → 回填没发生，见 6.6 |
+| 2 | 平台起来了 | `curl -s http://127.0.0.1:8090/api/health` 返回 `{"status":"ok"...}` | 起不来 → 看 `.local/platform.log` |
+| 3 | **私有仓库能访问** | 个人配置 → GitHub 一行仍是「已配置」；需求列表 → 更多 → 同步 GitHub，确认能拉到 Issue | 同步报 401/404 → 凭据没迁好，见 6.6 |
+| 4 | 端到端交付 | 挑一条需求跑完「发起 MR」，确认 GitHub 上出现 PR | MR 节点报凭据错误 → 见 6.6；报 IP 授权相关 → 见 6.7 |
+
+第 3 项是官方文档点名要求验证的：本部署绑定的 `zjordon/examination-system` 是私有仓库，正好落在受影响范围内。
+
+### 6.5 037：回滚窗口过后再执行
+
+`037_retire_plain_git_token.sql` 会把旧列 `user_configs.git_token` 清空——**仅当**它与新表里的 `github.com` 凭据值完全一致时才清；不一致则两边都保留。它还会删除 036 期间临时加的 `expose_to_workspace` 列。
+
+这一步是**不可逆**的收尾动作，不要和 036 在同一时间做。等 6.4 的四项都通过、并且不再需要回滚到旧版本之后：
+
+```bash
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u loopforge loopforge' \
+  < migrations/037_retire_plain_git_token.sql
+```
+
+**回滚到 0.4.0 的窗口只存在于执行 037 之前**：旧版本读的是 `user_configs.git_token`，036 只是复制不清空，所以在 037 之前把代码切回旧提交就能回退。
+
+### 6.6 回填为空时怎么查
+
+036 的回填有排除条件，以下情况**不会**被复制：
+
+- 该用户有工蜂 refresh token（`gongfeng_refresh_token` 非空）；
+- token 以 `oauth2:` 或 `private:` 开头（受管凭据，由部署适配器自己管理）；
+- `git_token` 本身为空。
+
+排查查询（写法上避开了嵌套引号，可直接复制；不输出 token 内容）：
+
+```bash
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u loopforge loopforge -e "SELECT user_id, LENGTH(TRIM(git_token)) AS token_len, LEFT(git_token,8) LIKE CONCAT(CHAR(111,97,117,116,104,50), CHAR(58), CHAR(37)) AS is_oauth2, LEFT(git_token,8) LIKE CONCAT(CHAR(112,114,105,118,97,116,101), CHAR(58), CHAR(37)) AS is_private, LENGTH(TRIM(gongfeng_refresh_token)) AS gongfeng_len FROM user_configs;"'
+```
+
+> 上面两个 `LIKE` 里的 `CHAR(...)` 分别拼出 `oauth2:` 和 `private:` 前缀，这样整条命令里不需要出现单引号。
+
+- `token_len = 0`（或 NULL）：这个用户本来就没配 GitHub，正常。
+- `is_oauth2 = 1` 或 `is_private = 1`：受管凭据，按设计不回填，由部署适配器继续提供，无需处理。
+- `token_len > 0`、两个前缀标记都是 0、`gongfeng_len = 0`，但 `user_git_http_credentials` 里没有这个用户的 `github.com` 行：重跑 036（幂等，已存在的 `github.com` 条目会被保留），仍不行就到个人配置里重新走一遍 GitHub 授权（0.4.1 的代码直接写新表，`internal/httpapi/github_auth.go:315`）。
+
+### 6.7 0.4.1 中与本部署相关的其它变化
+
+| 变化 | 对本部署的影响 |
+|------|---------------|
+| CodeBuddy 在平台模型功能里变为可选（#1157） | 第 1.4 节列的「仍然固定 CodeBuddy」边角功能可能已放开。升级后如果「澄清」「智能评测」能选 Claude Code，第 1.4 节即过时。**未在本部署上验证** |
+| 安装器自动重放 033/038（#1010） | 只对 `./start.sh` / `./start.sh pull` 生效；本部署走 `dev.sh`，仍需手工执行 |
+| HTTPS Git 服务器 IP 授权（#1232） | 自建 Git 服务器场景才需要；本部署用 github.com，不需要配置。如果 MR 节点推送失败且报 IP 授权相关错误，查这一项 |
+| 新增按主机分发可信 SSH 主机密钥（`039_platform_git_ssh_hosts.sql`） | 本部署不用 Git SSH，不需要执行 |
+| SOP 设计器的 AI 编排器重写 | 功能变化，无部署影响 |
+
+### 6.8 升级记录
+
+- 2026-11-23：fork 的 main 已合并上游 v0.4.1（`upstream/main @ 37e0dada`，合并提交 `0ed34e60`），仅 CHANGELOG 冲突。**服务器尚未升级**，本章步骤待执行。
+
+---
+
+## 7. 附录：API 速查与注意事项
+
+### 7.1 当晚用过的 API（均可用浏览器登录态直接 fetch）
 
 | 用途 | 请求 | 说明 |
 |------|------|------|
@@ -206,7 +332,7 @@ Run 详情页第一节点「需求定型」失败（通常十几秒内、0 token
 | 查 run 状态 | `GET /api/runs/{id}` | `status`；`nodes` 是 **map** 不是数组，用 `Object.values()` |
 | 触发 GitHub 同步 | （界面）需求列表 → 更多 → 同步 GitHub | 等价 `POST /api/sync/now`（后台异步） |
 
-### 6.2 检查清单（新成员接入 GLM + GitHub）
+### 7.2 检查清单（新成员接入 GLM + GitHub）
 
 - [ ] 个人配置 → Claude Code：Key + Base URL + 模型目录已保存（显示「已配置」）
 - [ ] 个人配置 → GitHub：device flow 授权完成（显示「已配置」）
@@ -216,7 +342,7 @@ Run 详情页第一节点「需求定型」失败（通常十几秒内、0 token
 - [ ] 需求的「关联 SOP」指向项目副本（列表「关联 SOP」列核对）
 - [ ] 需求列表 → 更多 → 同步 GitHub 已执行，Issue 带 GitHub 徽标进入列表
 
-### 6.3 其它注意事项
+### 7.3 其它注意事项
 
 - **凭据按人隔离**：没有全局环境变量可替所有人配 Claude Code key；API token 管理（`/api/auth/tokens`）只能用登录 Cookie，不允许 Bearer 自建。
 - **聊天路径同理**：AI 工作台 composer 里执行器选 Claude Code、模型选 GLM，Main Bot 对话同样不走 CodeBuddy。
